@@ -1,93 +1,232 @@
-# grr-dimensionnement
+# TP Dimensionnement
 
+[TOC]
 
+## Quotas
 
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://plmlab.math.cnrs.fr/anf2024/grr-dimensionnement.git
-git branch -M main
-git push -uf origin main
+Vérifiez les quotas de ressources (cpu/mémoire/pod) associés à votre namespace
+```bash
+kubectl get ressourcequota
 ```
 
-## Integrate with your tools
+Ne garder qu'un seul projet pour rester dans la limite globale des ressources de la plateforme. Le but est le dimensionnement de votre déploiement grr.
 
-- [ ] [Set up project integrations](https://plmlab.math.cnrs.fr/anf2024/grr-dimensionnement/-/settings/integrations)
+Réduire la quantité de mémoire et de cpu utilisés par les autres workload du namespace.
 
-## Collaborate with your team
+## Générateur de trafic grafana/k6
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+L'opérateur grafana/k6 est installé sur la plateforme. Il propose de lancer dans le namespace une génération de charges. Le test, écrit en javascript, peut s'adapater à tout type d'application. Il décrit un scénario de charge avec des montées et des descentes du nombre de Virtual User. Voir description ici.
 
-## Test and Deploy
+Vous commencez par interroger la page login de votre GRR avec une montée en charge jusqu'à 1000 en 1 minute puis 13 minutes à pleine charge et une descente la dernière minute. Le test.js est passé sous forme de data d'une ConfigMap :
 
-Use the built-in continuous integration in GitLab.
+```bash
+oc_user=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+cat <<EOF > k6-configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: k6-${oc_user}-test
+data:
+  test.js: |
+    import http from 'k6/http';
+    import { sleep } from 'k6';
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+    export const options = {
+      // Key configurations for Stress in this section
+      executor: 'ramping-arrival-rate', //Assure load increase if the system slows
+      stages: [
+        { duration: '1m', target: 1000 }, // traffic ramp-up from 1 to a higher 1000 users over 1 minutes.
+        { duration: '13m', target: 1000 }, // stay at higher 1000 users for 13 minutes
+        { duration: '1m', target: 0 }, // ramp-down to 0 users
+      ],
+    };
 
-***
+    export default function () {
+      const url1 = 'https://grr-${oc_user}.apps.anf.math.cnrs.fr/login.php';
 
-# Editing this README
+      const payload = JSON.stringify({
+        email: 'ADMINISTRATEUR',
+        password: 'admin',
+      });
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+      const params = {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      };
 
-## Suggestions for a good README
+      http.post(url1, payload, params);
+      // sleep(1);
+    };
+EOF
+kubectl apply -f k6-configmap.yml
+```
+L'opérateur définit le type de CustomRessource TestRun pour définir une campagne de test.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+oc_user=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+cat <<EOF > k6-testrun.yml
+apiVersion: k6.io/v1alpha1
+kind: TestRun
+metadata:
+  name: k6-${oc_user}
+spec:
+# suppression du TestRun apres la fin du test
+#  cleanup: 'post'
+  parallelism: 1
+  script:
+    configMap:
+      name: k6-${oc_user}-test
+      file: test.js
+  arguments: --out prometheus
+  separate: false
+  runner:
+# utilisation d'une image d'extension k6 qui expose un Prometheus exporter sur le port TCP/5656
+    image: ghcr.io/szkiba/xk6-prometheus:latest
+    metadata:
+      labels:
+        k6: k6-${oc_user}
+    securityContext:
+      runAsNonRoot: true
+    resources:
+      limits:
+        cpu: 200m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+# empeche le lancement du test pas de starter
+    readinessProbe:
+      timeoutSeconds: 10
+    livenessProbe:
+      timeoutSeconds: 10
+  starter:
+    metadata:
+      labels:
+        k6: k6-${oc_user}
+    securityContext:
+      runAsNonRoot: true
+EOF
+```
 
-## Name
-Choose a self-explaining name for your project.
+Le test se lance par `kubectl create -f k6-testrun.yml`. Il dure ici 15 minutes pour laisser la plateforme réagirt à la charge. Le réduire pour les premiers tests.
+Suivre le lancement des pod initializer, starter et le générateur de trafic lui-même. Suivre le résultat de ce dernier pod dans son log `kubectl logs k6-oc_user-...`.
+Sans l'option cleanup, il faut détruire le test à la main `kubectl delete -f k6-testrun.yml`.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+L'extension xk6-prometheus permet d'intégrer des métric dans le prometheus de la plateforme. Pour cela définissez un Service qui sera lié via le label au démarrage du TestRun.
+```bash
+oc_user=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+cat <<EOF > k6-service.yml
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    k6: k6-${oc_user}
+  name: k6-${oc_user}
+spec:
+  clusterIP: None
+  ports:
+  - name: k6-${oc_user}
+    port: 5656
+    protocol: TCP
+    targetPort: 5656
+  selector:
+    k6: k6-${oc_user}
+  type: ClusterIP
+status:
+  loadBalancer: {}
+EOF
+kubectl apply -f k6-service.yml
+```
+Un ServiceMonitor va faire la collecte du service exporter en ajoutant un préfixe "k6_".
+```bash
+oc_user=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+cat <<EOF > k6-servicemonitor.yml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  creationTimestamp: null
+  labels:
+    k6: k6-${oc_user}
+  name: k6-${oc_user}
+spec:
+  endpoints:
+  - interval:  10s
+    path:      /metrics
+    port:      k6-${oc_user}
+    scheme:    http
+    metricRelabelings:
+    - action: replace
+      regex: (.*)
+      replacement: 'k6_${1}'
+      sourceLabels:
+      - __name__
+      targetLabel: __name__
+  selector:
+    match Labels:
+      k6: k6-${oc_user}
+EOF
+kubectl apply -f k6-servicemonitor.yml
+```
+A partir du TestRun suivant, vous aurez les metrics dans Prometheus intégré. Observe/Metrics : par exemple k6_http_reqs
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Plus de possibilités de requêtes avec votre grafana.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Vertical Pod Autoscaler
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Activation du VPA en mode Off sur votre deployment grr.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+```bash
+oc_user=$(kubectl auth whoami -o jsonpath='{.status.userInfo.username}')
+cat <<EOF > grr-vpa.yml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: grr-${oc_user}
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind:       Deployment 
+    name:       grr 
+  updatePolicy:
+    updateMode: "Off" 
+EOF
+kubectl apply -f grr-vpa.yml
+```
+Lancer une campagne de test assez longue pour voir la recommandation upperBound changer. `oc get vpa grr-oc_user -o yaml`
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Vous pouvez surveiller le temps de réponse en fonction du nombre de requêtes et fixer un requests pour le cpu. Prenons cpu=100m et memory=256Mi pour la suite.
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+## Horizontal Pod Autoscaler
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+On va laisser le HPA faire varier le ReplicaSet entre 1 et 4 pod. Attention à avoir suffisamment de ressources dans le namespace pour l'ensemble des pod, en particulier sur la mémoire. Sinon, certains pod comme le TestRun vont être arrêtés prématurément.
+Prenons comme objectif de charger à 90% les pod du deployment grr.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+```bash
+cat <<EOF > grr-hpa.yml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: grr-hpa-90cpu
+spec:
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - resource:
+      name: cpu
+      target:
+        averageUtilization: 90
+        type: Utilization
+    type: Resource
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: grr
+EOF
+kubectl apply -f grr-hpa.yml
+kubectl create -f k6-testrun.yml
+kubectl get hpa -w
+```
+Surveillez en parallèle la création de nouveaux replicas `kubectl get pod -w`. La plateforme est configurée par défaut pour ne pas réagir à des pointes ponctuelles de charge mais d'attendre des tendances sur 5min.
