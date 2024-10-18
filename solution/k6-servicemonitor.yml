@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  creationTimestamp: null
+  labels:
+    k6: k6-azema
+  name: k6-azema
+spec:
+  endpoints:
+  - interval:  10s
+    path:      /metrics
+    port:      k6-azema
+    scheme:    http
+    metricRelabelings:
+    - action: replace
+      regex: (.*)
+      replacement: 'k6_'
+      sourceLabels:
+      - __name__
+      targetLabel: __name__
+  selector:
+    match Labels:
+      k6: k6-azema

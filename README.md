@@ -15,7 +15,7 @@ Réduire la quantité de mémoire et de cpu utilisés par les autres workload du
 
 ## Générateur de trafic grafana/k6
 
-L'opérateur grafana/k6 est installé sur la plateforme. Il propose de lancer dans le namespace une génération de charges. Le test, écrit en javascript, peut s'adapater à tout type d'application. Il décrit un scénario de charge avec des montées et des descentes du nombre de Virtual User. Voir description ici.
+L'opérateur grafana/k6 est installé sur la plateforme. Il propose de lancer dans le namespace une génération de charges. Le test, écrit en javascript, peut s'adapater à tout type d'application. Il décrit un scénario de charge avec des montées et des descentes du nombre de Virtual User. Voir documentation https://grafana.com/docs/k6/latest/.
 
 Vous commencez par interroger la page login de votre GRR avec une montée en charge jusqu'à 1000 en 1 minute puis 13 minutes à pleine charge et une descente la dernière minute. Le test.js est passé sous forme de data d'une ConfigMap :
 

@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  creationTimestamp: null
+  name: k6-azema-test
+data:
+  test.js: |
+    import http from 'k6/http';
+    import { sleep } from 'k6';
+
+    export const options = {
+      // Key configurations for Stress in this section
+      executor: 'ramping-arrival-rate', //Assure load increase if the system slows
+      stages: [
+        { duration: '1m', target: 1000 }, // traffic ramp-up from 1 to a higher 1000 users over 1 minutes.
+        { duration: '13m', target: 1000 }, // stay at higher 1000 users for 13 minutes
+        { duration: '1m', target: 0 }, // ramp-down to 0 users
+      ],
+    };
+
+    export default function () {
+      const url1 = 'https://grr-azema.apps.anf.math.cnrs.fr/login.php';
+
+      const payload = JSON.stringify({
+        email: 'ADMINISTRATEUR',
+        password: 'admin',
+      });
+
+      const params = {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      };
+
+      http.post(url1, payload, params);
+      // sleep(1);
+    };

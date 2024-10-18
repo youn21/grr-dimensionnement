@@ -1,0 +1,40 @@
+apiVersion: k6.io/v1alpha1
+kind: TestRun
+metadata:
+  name: k6-azema
+spec:
+# suppression du TestRun apres la fin du test
+#  cleanup: 'post'
+  parallelism: 1
+  script:
+    configMap:
+      name: k6-azema-test
+      file: test.js
+  arguments: --out prometheus
+  separate: false
+  runner:
+# utilisation d'une image d'extension k6 qui expose un Prometheus exporter sur le port TCP/5656
+    image: ghcr.io/szkiba/xk6-prometheus:latest
+    metadata:
+      labels:
+        k6: k6-azema
+    securityContext:
+      runAsNonRoot: true
+    resources:
+      limits:
+        cpu: 200m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+# empeche le lancement du test pas de starter
+    readinessProbe:
+      timeoutSeconds: 10
+    livenessProbe:
+      timeoutSeconds: 10
+  starter:
+    metadata:
+      labels:
+        k6: k6-azema
+    securityContext:
+      runAsNonRoot: true
