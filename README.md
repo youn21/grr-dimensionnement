@@ -165,7 +165,7 @@ spec:
       - __name__
       targetLabel: __name__
   selector:
-    match Labels:
+    matchLabels:
       k6: k6-${oc_user}
 EOF
 kubectl apply -f k6-servicemonitor.yml
