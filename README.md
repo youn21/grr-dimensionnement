@@ -6,7 +6,7 @@
 
 Vérifiez les quotas de ressources (cpu/mémoire/pod) associés à votre namespace
 ```bash
-kubectl get ressourcequota
+kubectl get resourcequota
 ```
 
 Ne garder qu'un seul projet pour rester dans la limite globale des ressources de la plateforme. Le but est le dimensionnement de votre déploiement grr.
